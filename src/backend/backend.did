@@ -1,0 +1,22 @@
+type BitcoinNetwork = variant {
+    mainnet;
+    testnet;
+};
+
+type VetkdDeriveEncryptedKeyArgs = record {
+    public_key_derivation_path : vec blob;
+    encryption_public_key : blob;
+};
+
+type VetkdEncryptedKeyReply = record {
+    encrypted_key : blob;
+};
+
+service : (BitcoinNetwork) -> {
+    "register_will": (principal, text, nat64) -> (text);
+    "i_am_alive": () -> ();
+    "store_encrypted_secret": (blob) -> ();
+    "get_vault_btc_address": () -> (text);
+    "claim_inheritance": (principal) -> (variant { Ok: blob; Err: text });
+    "vetkd_derive_encrypted_key": (VetkdDeriveEncryptedKeyArgs) -> (variant { Ok: VetkdEncryptedKeyReply; Err: text });
+};
