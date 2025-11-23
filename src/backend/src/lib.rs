@@ -46,6 +46,7 @@ fn register_will(
     beneficiary: Principal,
     beneficiary_btc_address: String,
     heartbeat_seconds: u64,
+    encrypted_secret: Vec<u8>,
 ) -> String {
     let owner = caller();
     let now = ic_cdk::api::time() / 1_000_000_000; // Convert nanoseconds to seconds
@@ -56,7 +57,7 @@ fn register_will(
         beneficiary_btc_address,
         heartbeat_seconds,
         last_active: now,
-        encrypted_secret: None,
+        encrypted_secret: if encrypted_secret.is_empty() { None } else { Some(encrypted_secret) },
     };
 
     WILLS.with(|w| w.borrow_mut().insert(owner, will));
@@ -92,7 +93,74 @@ fn store_encrypted_secret(ciphertext: Vec<u8>) {
     });
 }
 
-// D. Get the Bitcoin Vault Address
+// D. Get Will Status (heartbeat timer and last_active)
+#[derive(CandidType, Deserialize)]
+struct WillStatus {
+    heartbeat_seconds: u64,
+    last_active: u64,
+}
+
+#[update]
+fn get_will_status() -> Result<WillStatus, String> {
+    let owner = caller();
+    
+    WILLS.with(|w| {
+        let wills = w.borrow();
+        if let Some(will) = wills.get(&owner) {
+            Ok(WillStatus {
+                heartbeat_seconds: will.heartbeat_seconds,
+                last_active: will.last_active,
+            })
+        } else {
+            Err("No will found for this user".to_string())
+        }
+    })
+}
+
+// E. Get All Inheritances for Current User (as Beneficiary)
+#[derive(CandidType, Deserialize)]
+struct InheritanceInfo {
+    owner_principal: Principal,
+    beneficiary_btc_address: String,
+    heartbeat_seconds: u64,
+    last_active: u64,
+    time_remaining: u64,
+    is_expired: bool,
+}
+
+#[update]
+fn get_my_inheritances() -> Vec<InheritanceInfo> {
+    let beneficiary = caller();
+    let now = ic_cdk::api::time() / 1_000_000_000;
+    
+    WILLS.with(|w| {
+        let wills = w.borrow();
+        wills
+            .iter()
+            .filter(|(_, will)| will.beneficiary == beneficiary)
+            .map(|(owner, will)| {
+                let elapsed = now - will.last_active;
+                let time_remaining = if elapsed > will.heartbeat_seconds {
+                    0
+                } else {
+                    will.heartbeat_seconds - elapsed
+                };
+                let is_expired = elapsed > will.heartbeat_seconds;
+                
+                InheritanceInfo {
+                    owner_principal: *owner,
+                    beneficiary_btc_address: will.beneficiary_btc_address.clone(),
+                    heartbeat_seconds: will.heartbeat_seconds,
+                    last_active: will.last_active,
+                    time_remaining,
+                    is_expired,
+                }
+            })
+            .collect()
+    })
+}
+
+// F. Get the Bitcoin Vault Address
 // We derive a unique BTC address for the user based on their Principal
 #[update]
 async fn get_vault_btc_address() -> String {
@@ -119,7 +187,7 @@ async fn get_vault_btc_address() -> String {
     hex::encode(pub_key.public_key)
 }
 
-// E. CLAIM INHERITANCE (The Trigger)
+// G. CLAIM INHERITANCE (The Trigger)
 #[update]
 async fn claim_inheritance(owner_principal: Principal) -> Result<Vec<u8>, String> {
     let caller = caller();

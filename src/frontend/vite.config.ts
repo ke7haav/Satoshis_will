@@ -1,8 +1,6 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import environment from 'vite-plugin-environment';
-import dotenv from 'dotenv';
-dotenv.config({ path: '../../.env' });
 
 export default defineConfig({
   root: '.',
@@ -11,11 +9,24 @@ export default defineConfig({
     emptyOutDir: true,
   },
   optimizeDeps: {
+    include: ['buffer'],
     esbuildOptions: {
       define: {
         global: 'globalThis',
+        'process.env': '{}',
       },
     },
+  },
+  resolve: {
+    // Allow resolving declarations from outside the frontend directory
+    alias: {
+      '@declarations': '../../declarations',
+      buffer: 'buffer',
+    },
+  },
+  define: {
+    'process.env': '{}',
+    global: 'globalThis',
   },
   server: {
     proxy: {
@@ -31,4 +42,3 @@ export default defineConfig({
     environment('all', { prefix: 'DFX_' }),
   ],
 });
-
