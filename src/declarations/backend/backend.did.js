@@ -29,7 +29,17 @@ export const idlFactory = ({ IDL }) => {
         [],
       ),
     'get_my_inheritances' : IDL.Func([], [IDL.Vec(InheritanceInfo)], []),
+    'get_vault_balance' : IDL.Func(
+        [IDL.Text],
+        [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : IDL.Text })],
+        [],
+      ),
     'get_vault_btc_address' : IDL.Func([], [IDL.Text], []),
+    'get_vault_ckbtc_balance' : IDL.Func(
+        [],
+        [IDL.Variant({ 'Ok' : IDL.Nat, 'Err' : IDL.Text })],
+        [],
+      ),
     'get_will_status' : IDL.Func(
         [],
         [IDL.Variant({ 'Ok' : WillStatus, 'Err' : IDL.Text })],

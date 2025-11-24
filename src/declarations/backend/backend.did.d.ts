@@ -30,7 +30,17 @@ export interface _SERVICE {
       { 'Err' : string }
   >,
   'get_my_inheritances' : ActorMethod<[], Array<InheritanceInfo>>,
+  'get_vault_balance' : ActorMethod<
+    [string],
+    { 'Ok' : bigint } |
+      { 'Err' : string }
+  >,
   'get_vault_btc_address' : ActorMethod<[], string>,
+  'get_vault_ckbtc_balance' : ActorMethod<
+    [],
+    { 'Ok' : bigint } |
+      { 'Err' : string }
+  >,
   'get_will_status' : ActorMethod<
     [],
     { 'Ok' : WillStatus } |

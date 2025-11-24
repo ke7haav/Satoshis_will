@@ -43,10 +43,13 @@ dfx deploy internet_identity
 echo "✓ Internet Identity deployed"
 echo ""
 
-# Step 5: Deploy Backend
-echo "⚙️  Deploying Backend canister..."
-dfx deploy backend
+# Step 5: Deploy Backend (with testnet Bitcoin network)
+echo "⚙️  Deploying Backend canister (Bitcoin Testnet)..."
+dfx deploy backend --argument '(variant { testnet })'
 echo "✓ Backend deployed"
+echo ""
+echo "⚠️  NOTE: Bitcoin balance checking only works on IC Mainnet, not local replica."
+echo "    For local testing, the balance will show 0 or an error."
 echo ""
 
 # Step 6: Generate Backend declarations

@@ -123,8 +123,6 @@ function App() {
               isActive={activeWindow === 'login'}
               onActivate={() => setActiveWindow('login')}
               onLogin={satoshi.login}
-              onLoginWithPrincipal={satoshi.loginWithPrincipal}
-              currentPrincipal={satoshi.principal}
             />
           </div>
         )}

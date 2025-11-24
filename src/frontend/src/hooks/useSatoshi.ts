@@ -49,6 +49,7 @@ export const useSatoshi = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [declarationsLoaded, setDeclarationsLoaded] = useState(false);
+  const [authClientInstance, setAuthClientInstance] = useState<AuthClient | null>(null); // Store AuthClient instance
 
   // 0. Load declarations on mount - don't block rendering
   useEffect(() => {
@@ -63,7 +64,15 @@ export const useSatoshi = () => {
   // 1. Initialize Auth Client
   const initAuth = useCallback(async () => {
     try {
-      const authClient = await AuthClient.create();
+      // Configure AuthClient with extended timeouts for Dead Man Switch use case
+      // Users might not log in frequently, so we extend session duration
+      const authClient = await AuthClient.create({
+        idleOptions: {
+          idleTimeout: 1000 * 60 * 60 * 24, // 24 hours of inactivity before timeout (default is 10 minutes)
+          disableDefaultIdleCallback: true, // Don't reload page on idle
+        },
+      });
+      setAuthClientInstance(authClient); // Store the instance
       
       if (await authClient.isAuthenticated()) {
         // Only try to authenticate if declarations are loaded
@@ -124,7 +133,12 @@ export const useSatoshi = () => {
   // 3. Login Function
   const login = async () => {
     try {
-      const authClient = await AuthClient.create();
+      // Use stored AuthClient instance if available, otherwise create new one
+      let authClient = authClientInstance;
+      if (!authClient) {
+        authClient = await AuthClient.create();
+        setAuthClientInstance(authClient);
+      }
       
       // Check if already authenticated (persistent login)
       if (await authClient.isAuthenticated()) {
@@ -149,12 +163,21 @@ export const useSatoshi = () => {
       
       console.log('Logging in with Internet Identity:', internetIdentityId);
       
+      // Set maxTimeToLive to 30 days (in nanoseconds)
+      // This extends the authentication delegation from default 8 hours to 30 days
+      // Important for Dead Man Switch where users might not log in frequently
+      const maxTimeToLive = BigInt(30 * 24 * 60 * 60 * 1_000_000_000); // 30 days in nanoseconds
+      
       await authClient.login({
         identityProvider:
           network === 'ic'
             ? 'https://identity.ic0.app'
             : `http://${internetIdentityId}.localhost:4943`, // Local II
-        onSuccess: () => handleAuthenticated(authClient),
+        maxTimeToLive: maxTimeToLive, // Extend session to 30 days (default is 8 hours)
+        onSuccess: () => {
+          // After successful login, the identity is automatically saved to localStorage
+          handleAuthenticated(authClient);
+        },
       });
     } catch (err: any) {
       setError(`Login failed: ${err.message}`);
@@ -162,90 +185,14 @@ export const useSatoshi = () => {
     }
   };
 
-  // 4. Login with Principal ID (Quick Login)
-  // Checks if stored identity matches the Principal ID
-  const loginWithPrincipal = async (principalId: string): Promise<boolean> => {
-    try {
-      const authClient = await AuthClient.create();
-      
-      // Check if already authenticated with this Principal
-      if (await authClient.isAuthenticated()) {
-        const currentIdentity = authClient.getIdentity();
-        const currentPrincipal = currentIdentity.getPrincipal().toText();
-        
-        if (currentPrincipal === principalId) {
-          // Already logged in with this Principal - just restore session
-          console.log('Already authenticated with this Principal, restoring session...');
-          await handleAuthenticated(authClient);
-          return true;
-        } else {
-          // Logged in with different Principal
-          console.log(`Currently logged in as ${currentPrincipal}, but requested ${principalId}`);
-          // AuthClient only loads the last used identity, so we can't easily switch
-          // User needs to logout and login again with Internet Identity for that Principal
-          return false;
-        }
-      }
-      
-      // Not authenticated - AuthClient.create() should have auto-loaded the last identity
-      // If we're here and not authenticated, it means no stored identity exists
-      // OR the stored identity doesn't match
-      
-      // Try to check localStorage directly for any stored identities
-      // This is a workaround since AuthClient doesn't expose iteration
-      const hasStoredIdentity = checkLocalStorageForPrincipal();
-      
-      if (hasStoredIdentity) {
-        // There might be a stored identity, but AuthClient didn't auto-load it
-        // This can happen if there are multiple identities and a different one was last used
-        // Unfortunately, we can't easily switch to a specific identity
-        console.log('Stored identity may exist, but AuthClient loads last used identity only');
-        return false;
-      }
-      
-      return false; // No stored identity found for this Principal
-    } catch (err: any) {
-      console.error('Login with Principal ID failed:', err);
-      throw err;
-    }
-  };
-
-  // Helper: Check localStorage for any stored identities
-  const checkLocalStorageForPrincipal = (): boolean => {
-    try {
-      // AuthClient stores identities in localStorage
-      // We can check if there are any identity-related keys
-      // But we can't easily decrypt/parse them without AuthClient's internal methods
-      
-      let identityKeyCount = 0;
-      for (let i = 0; i < localStorage.length; i++) {
-        const key = localStorage.key(i);
-        if (key && (
-          key.includes('identity') || 
-          key.startsWith('ic-identity-') ||
-          key.includes('_ii_') ||
-          key.includes('auth-client')
-        )) {
-          identityKeyCount++;
-        }
-      }
-      
-      // If we find identity keys, there might be stored identities
-      // But we can't verify which Principal they belong to without decrypting
-      return identityKeyCount > 0;
-    } catch (err) {
-      console.error('Error checking localStorage:', err);
-      return false;
-    }
-  };
-
-  // 5. Logout Function
+  // 4. Logout Function
   const logout = async () => {
-    const authClient = await AuthClient.create();
+    const authClient = authClientInstance || await AuthClient.create();
     await authClient.logout();
     setIsAuthenticated(false);
     setBackend(null);
     setPrincipal(null);
+    setAuthClientInstance(null);
   };
 
   // --- PROTOCOL FUNCTIONS ---
@@ -299,6 +246,39 @@ export const useSatoshi = () => {
       console.error('Error fetching vault address:', err);
       setError(`Failed to fetch vault address: ${err.message || err}`);
       return "";
+    }
+  }, [backend]);
+
+  const getVaultBalance = useCallback(async (address: string): Promise<number> => {
+    if (!backend || !address) {
+      console.warn('getVaultBalance: Backend actor not initialized or address missing');
+      return 0;
+    }
+    try {
+      console.log('Fetching vault BTC balance for address:', address);
+      const result = await backend.get_vault_balance(address);
+      console.log('Vault BTC balance result:', result);
+      
+      // Handle Result type: { Ok: BigInt } | { Err: string }
+      if ('Ok' in result) {
+        const balance = Number(result.Ok);
+        console.log('Vault BTC balance received:', balance, 'satoshis');
+        return balance;
+      } else if ('Err' in result) {
+        const errorMsg = result.Err;
+        console.error('Error fetching vault BTC balance:', errorMsg);
+        setError(`Failed to fetch vault BTC balance: ${errorMsg}`);
+        throw new Error(errorMsg);
+      } else {
+        // Fallback for unexpected format
+        console.warn('Unexpected result format:', result);
+        return 0;
+      }
+    } catch (err: any) {
+      console.error('Error fetching vault BTC balance:', err);
+      const errorMsg = err?.message || err?.toString() || 'Unknown error';
+      setError(`Failed to fetch vault BTC balance: ${errorMsg}`);
+      throw err; // Re-throw to let caller handle
     }
   }, [backend]);
 
@@ -385,11 +365,11 @@ export const useSatoshi = () => {
     isAuthenticated,
     principal,
     login,
-    loginWithPrincipal,
     logout,
     registerWill,
     sendHeartbeat,
     getVaultAddress,
+    getVaultBalance,
     getWillStatus,
     getMyInheritances,
     claimInheritance,

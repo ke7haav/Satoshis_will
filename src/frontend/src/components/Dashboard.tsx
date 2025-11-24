@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Activity, Clock, Wallet, CheckCircle2, Loader2, RefreshCw } from 'lucide-react';
 import { useSatoshi } from '../hooks/useSatoshi';
 import { publicKeyToBitcoinAddress } from '../utils/bitcoinAddress';
@@ -12,9 +12,12 @@ interface DashboardProps {
 }
 
 export default function Dashboard({ onClose, isActive, onActivate, onTimeRemainingChange, onHasWillChange }: DashboardProps) {
-  const { sendHeartbeat, getVaultAddress, getWillStatus, loading, isAuthenticated } = useSatoshi();
+  const { sendHeartbeat, getVaultAddress, getVaultBalance, getWillStatus, loading, isAuthenticated } = useSatoshi();
   const [timeRemaining, setTimeRemaining] = useState(0);
   const [vaultAddress, setVaultAddress] = useState<string>('');
+  const [btcBalance, setBtcBalance] = useState<number | null>(null); // Balance in satoshis
+  const [fetchingBalance, setFetchingBalance] = useState(false);
+  const [balanceError, setBalanceError] = useState<string | null>(null);
   const [isAlive] = useState(true);
   const [isPressed, setIsPressed] = useState(false);
   const [fetchingAddress, setFetchingAddress] = useState(false);
@@ -23,20 +26,98 @@ export default function Dashboard({ onClose, isActive, onActivate, onTimeRemaini
   const [heartbeatSeconds, setHeartbeatSeconds] = useState<number | null>(null);
   const [lastActive, setLastActive] = useState<number | null>(null);
 
+  // Fetch BTC balance for the vault address
+  const fetchBtcBalance = useCallback(async (address: string, forceRefresh: boolean = false) => {
+    if (!isAuthenticated || !getVaultBalance || !address) {
+      setBtcBalance(null);
+      setBalanceError(null);
+      return;
+    }
+
+    // Check localStorage cache first (unless forcing refresh)
+    if (!forceRefresh) {
+      try {
+        const cachedBalance = localStorage.getItem(`btc_balance_${address}`);
+        const cachedTimestamp = localStorage.getItem(`btc_balance_timestamp_${address}`);
+        if (cachedBalance && cachedTimestamp) {
+          const timestamp = parseInt(cachedTimestamp, 10);
+          const now = Date.now();
+          // Cache valid for 5 minutes
+          if (now - timestamp < 5 * 60 * 1000) {
+            console.log('Dashboard: Using cached BTC balance from localStorage');
+            setBtcBalance(parseInt(cachedBalance, 10));
+            setBalanceError(null);
+            setFetchingBalance(false);
+            return;
+          }
+        }
+      } catch (e) {
+        console.warn('Dashboard: Failed to read balance from localStorage:', e);
+      }
+    }
+
+    setFetchingBalance(true);
+    setBalanceError(null);
+
+    try {
+      console.log('Dashboard: Fetching BTC balance for address:', address);
+      const balance = await getVaultBalance(address);
+      console.log('Dashboard: BTC balance received:', balance, 'satoshis');
+
+      // Cache the balance
+      try {
+        localStorage.setItem(`btc_balance_${address}`, balance.toString());
+        localStorage.setItem(`btc_balance_timestamp_${address}`, Date.now().toString());
+        console.log('Dashboard: Cached BTC balance to localStorage');
+      } catch (e) {
+        console.warn('Dashboard: Failed to cache balance to localStorage:', e);
+      }
+
+      setBtcBalance(balance);
+      setBalanceError(null);
+    } catch (err: any) {
+      const errorMsg = err?.message || err?.toString() || 'Unknown error';
+      setBalanceError(errorMsg);
+      console.error('Dashboard: Failed to fetch BTC balance:', err);
+      setBtcBalance(null);
+    } finally {
+      setFetchingBalance(false);
+    }
+  }, [isAuthenticated, getVaultBalance]);
+
   // Fetch vault address on mount and when authenticated
-  const fetchVaultAddress = async () => {
+  const fetchVaultAddress = useCallback(async (forceRefresh: boolean = false) => {
     if (!isAuthenticated || !getVaultAddress) {
       setVaultAddress('');
       setAddressError(null);
       return;
     }
     
+    // Check localStorage cache first (unless forcing refresh)
+    if (!forceRefresh) {
+      try {
+        const cachedAddress = localStorage.getItem('vault_btc_address');
+        if (cachedAddress) {
+          console.log('Dashboard: Using cached vault BTC address from localStorage');
+          setVaultAddress(cachedAddress);
+          setAddressError(null);
+          setFetchingAddress(false);
+          return; // Use cached address, no need to fetch
+        }
+      } catch (e) {
+        console.warn('Dashboard: Failed to read from localStorage:', e);
+        // Continue to fetch from backend
+      }
+    }
+    
     setFetchingAddress(true);
     setAddressError(null);
-    setVaultAddress(''); // Reset address
+    if (forceRefresh) {
+      setVaultAddress(''); // Reset address only on force refresh
+    }
     
     try {
-      console.log('Dashboard: Fetching vault address...');
+      console.log('Dashboard: Fetching vault address from backend...');
       const publicKeyHex = await getVaultAddress();
       console.log('Dashboard: Received public key (hex):', publicKeyHex);
       
@@ -44,26 +125,44 @@ export default function Dashboard({ onClose, isActive, onActivate, onTimeRemaini
         // Check if it's already a Bitcoin address (starts with 1, 3, bc1, tb1, etc.)
         const isAlreadyAddress = /^(1|3|bc1|tb1|m|n|2)/.test(publicKeyHex.trim());
         
+        let finalBtcAddress: string;
+        
         if (isAlreadyAddress) {
           // Already a Bitcoin address, use as-is
           console.log('Dashboard: Received address is already a Bitcoin address');
-          setVaultAddress(publicKeyHex.trim());
-          setAddressError(null);
+          finalBtcAddress = publicKeyHex.trim();
         } else {
           // It's a public key hex, convert to Bitcoin address
           try {
             console.log('Dashboard: Converting public key to Bitcoin address...');
             // Default to testnet (backend defaults to testnet)
-            const btcAddress = publicKeyToBitcoinAddress(publicKeyHex.trim(), 'testnet');
-            console.log('Dashboard: Converted to Bitcoin address:', btcAddress);
-            setVaultAddress(btcAddress);
-            setAddressError(null);
+            finalBtcAddress = publicKeyToBitcoinAddress(publicKeyHex.trim(), 'testnet');
+            console.log('Dashboard: Converted to Bitcoin address:', finalBtcAddress);
           } catch (conversionError: any) {
             console.error('Dashboard: Failed to convert public key:', conversionError);
             setAddressError(`Conversion failed: ${conversionError.message}`);
             // Still show the hex for debugging
-            setVaultAddress(publicKeyHex.trim());
+            finalBtcAddress = publicKeyHex.trim();
           }
+        }
+        
+        // Cache the final BTC address in localStorage
+        try {
+          localStorage.setItem('vault_btc_address', finalBtcAddress);
+          console.log('Dashboard: Cached vault BTC address to localStorage');
+        } catch (e) {
+          console.warn('Dashboard: Failed to cache address to localStorage:', e);
+          // Continue anyway, address is still set
+        }
+        
+        setVaultAddress(finalBtcAddress);
+        setAddressError(null);
+        
+        // Fetch balance for the new address (if force refresh, also refresh balance)
+        if (forceRefresh) {
+          fetchBtcBalance(finalBtcAddress, true);
+        } else {
+          fetchBtcBalance(finalBtcAddress, false);
         }
       } else {
         setAddressError('Empty response from backend');
@@ -76,7 +175,17 @@ export default function Dashboard({ onClose, isActive, onActivate, onTimeRemaini
     } finally {
       setFetchingAddress(false);
     }
-  };
+  }, [isAuthenticated, getVaultAddress, fetchBtcBalance]);
+
+  // Fetch BTC balance when vault address is available
+  useEffect(() => {
+    if (vaultAddress && isAuthenticated) {
+      fetchBtcBalance(vaultAddress);
+    } else {
+      setBtcBalance(null);
+      setBalanceError(null);
+    }
+  }, [vaultAddress, isAuthenticated, fetchBtcBalance]);
 
   // Fetch will status to get heartbeat timer and last_active
   useEffect(() => {
@@ -168,6 +277,22 @@ export default function Dashboard({ onClose, isActive, onActivate, onTimeRemaini
     const minutes = Math.floor((seconds % 3600) / 60);
     const secs = seconds % 60;
     return `${String(days).padStart(3, '0')}:${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  };
+
+  const formatBtcBalance = (satoshis: number): string => {
+    if (satoshis === 0) return '0 BTC';
+    // Convert satoshis to BTC (1 BTC = 100,000,000 satoshis)
+    const btc = satoshis / 100_000_000;
+    if (btc >= 1) {
+      // For amounts >= 1 BTC, show with 8 decimal places
+      return `${btc.toFixed(8)} BTC`;
+    } else if (btc >= 0.00001) {
+      // For amounts >= 0.00001 BTC, show with appropriate precision
+      return `${btc.toFixed(8)} BTC`;
+    } else {
+      // For very small amounts, show in satoshis
+      return `${satoshis.toLocaleString()} sats`;
+    }
   };
 
   const handleHeartbeat = async () => {
@@ -301,10 +426,10 @@ export default function Dashboard({ onClose, isActive, onActivate, onTimeRemaini
               <Wallet size={12} />
               VAULT BTC ADDRESS
               <button
-                onClick={fetchVaultAddress}
+                onClick={() => fetchVaultAddress(true)}
                 disabled={fetchingAddress || !isAuthenticated}
                 className="ml-auto btn-retro px-2 py-1 text-xs flex items-center gap-1"
-                title="Refresh vault address"
+                title="Refresh vault address (force fetch from backend)"
               >
                 <RefreshCw size={10} className={fetchingAddress ? 'animate-spin' : ''} />
               </button>
@@ -319,7 +444,7 @@ export default function Dashboard({ onClose, isActive, onActivate, onTimeRemaini
                 <div className="bg-black text-red-500 font-mono text-xs text-center py-3 px-4 border-2 border-red-800">
                   <div>ERROR: {addressError}</div>
                   <button
-                    onClick={fetchVaultAddress}
+                    onClick={() => fetchVaultAddress(true)}
                     className="btn-retro mt-2 px-3 py-1 text-xs"
                   >
                     RETRY
@@ -336,6 +461,52 @@ export default function Dashboard({ onClose, isActive, onActivate, onTimeRemaini
                       : vaultAddress.startsWith('bc1') || vaultAddress.startsWith('1')
                       ? 'Mainnet Bitcoin Address'
                       : 'Your unique vault address'}
+                  </div>
+                  
+                  {/* BTC Balance Display */}
+                  <div className="mt-3 pt-3 border-t-2 border-gray-600">
+                    <div className="text-xs font-bold mb-1 text-gray-700">BTC BALANCE:</div>
+                    {fetchingBalance ? (
+                      <div className="bg-black text-gray-500 font-mono text-xs text-center py-2 px-3 border-2 border-gray-800 flex items-center justify-center gap-2">
+                        <Loader2 size={12} className="animate-spin" />
+                        CHECKING...
+                      </div>
+                    ) : balanceError ? (
+                      <div className="bg-black text-yellow-500 font-mono text-xs text-center py-3 px-4 border-2 border-yellow-800">
+                        <div className="font-bold mb-2">⚠️ LOCAL DEVELOPMENT LIMITATION</div>
+                        <div className="text-[10px] leading-tight mb-2">
+                          {balanceError.includes('not available in local development') || balanceError.includes('not found') ? (
+                            <>
+                              Bitcoin balance checking requires IC Mainnet deployment.<br/>
+                              This feature is not available in local DFX development.
+                            </>
+                          ) : (
+                            balanceError
+                          )}
+                        </div>
+                        <div className="text-[9px] text-yellow-300 mt-2">
+                          To test Bitcoin features, deploy to IC Mainnet
+                        </div>
+                      </div>
+                    ) : btcBalance !== null ? (
+                      <div className="bg-black text-green-500 font-mono text-base font-bold text-center py-2 px-3 border-2 border-gray-800">
+                        {formatBtcBalance(btcBalance)}
+                      </div>
+                    ) : (
+                      <div className="bg-black text-gray-500 font-mono text-xs text-center py-2 px-3 border-2 border-gray-800">
+                        Not available
+                      </div>
+                    )}
+                    <div className="flex justify-end mt-1">
+                      <button
+                        onClick={() => fetchBtcBalance(vaultAddress, true)}
+                        disabled={fetchingBalance}
+                        className="btn-retro px-2 py-1 text-xs flex items-center gap-1"
+                        title="Refresh BTC balance"
+                      >
+                        <RefreshCw size={10} className={fetchingBalance ? 'animate-spin' : ''} />
+                      </button>
+                    </div>
                   </div>
                 </>
               ) : (
@@ -367,3 +538,4 @@ export default function Dashboard({ onClose, isActive, onActivate, onTimeRemaini
     </div>
   );
 }
+
